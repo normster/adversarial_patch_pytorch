@@ -6,7 +6,6 @@ import argparse
 import os
 import random
 import shutil
-import time
 import warnings
 
 import torch
@@ -52,7 +51,7 @@ parser.add_argument('--validate-freq', default=100, type=int,
                     help='number of steps to run before evaluating')
 parser.add_argument('-b', '--batch-size', default = 16, type = int,
                     metavar='N', help='mini-batch size (default: 16)')
-parser.add_argument('--lr', '--learning-rate', default=5.0, type=float,
+parser.add_argument('--lr', '--learning-rate', default=10, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -62,11 +61,6 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--target-class', default = 859, type = int,
                     help='target class of adversarial patch')
-# for plotting
-parser.add_argument('--plotting', action = 'store_true',
-                    help='plot one of the example')
-parser.add_argument('--plotting_path', type = str, default = './',
-                    help='location for storing perturbed images')
 parser.add_argument('--patch', type=str, default='patch',
                     help='location for storing patches')
 parser.add_argument('--max-angle', type=float, default='22.5',
@@ -118,65 +112,59 @@ def main():
     # legal g range: [-0.456 / 0.224, (1 - 0.456) / 0.224]
     # legal b range: [-0.406 / 0.225, (1 - 0.406) / 0.225]
     patch = torch.zeros((3, 224, 224)).cuda()
-    patch[0] = (patch[0] - 0.485) / 0.229
-    patch[1] = (patch[1] - 0.456) / 0.224
-    patch[2] = (patch[2] - 0.406) / 0.225
+    patch = normalize(patch)
+
     patch.requires_grad = True
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD([patch], args.lr)
+    
+    model.eval()
 
+    for i, (data, _) in enumerate(test_loader):
+        train_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
+        import pudb
+        pudb.set_trace()
+        data = data.cuda()
+
+        patch.detach_()
+        patch.requires_grad = True
+
+        params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
+        # Apply patch
+        patched_data = apply_patch(data, patch, params)
+        output = model(patched_data)
+
+        loss = criterion(output, train_targets)
+        loss.backward()
+
+        patch.data.add_(-args.lr, patch.grad.data)
+        clamp_to_valid(patch)
+
+        if i >= args.steps:
+            break
+        
+        if (i + 1) % args.validate_freq == 0:
+            pil = tensor_to_pil(patch, clip=True)
+            print("Saving patch after Batch {}/{}".format(i+1, args.steps))
+            pil.save("patch_{}.png".format(i//args.validate_freq))
+
+
+    #validate_per_scale(test_loader, patch, model)
+
+    with open(args.patch, "wb") as f:
+        pickle.dump(patch.cpu(), f)
+
+
+def clamp_to_valid(patch):
     ch_ranges = [
             [-0.485 / 0.229, (1 - 0.485) / 0.229],
             [-0.456 / 0.224, (1 - 0.456) / 0.224],
             [-0.406 / 0.225, (1 - 0.406) / 0.225],
     ]
-    
-    model.eval()
-    i = 0
 
-    train_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
-
-    while True:
-        finished = False
-        for data, _ in test_loader:
-            data = data.cuda()
-            optimizer.zero_grad()
-            patch = patch.detach()
-            patch.requires_grad = True
-            params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
-            # Apply patch
-            output = model(apply_patch(data, patch, params))
-
-            loss = criterion(output, train_targets)
-            loss.backward()
-
-            optimizer.step()
-
-            if ch_ranges:
-                patch[0] = torch.clamp(patch[0], ch_ranges[0][0], ch_ranges[0][1])
-                patch[1] = torch.clamp(patch[1], ch_ranges[1][0], ch_ranges[1][1])
-                patch[2] = torch.clamp(patch[2], ch_ranges[2][0], ch_ranges[2][1])
-            else:
-                patch = torch.clamp(patch, 0, 1)
-
-            i += 1
-            if i >= args.steps:
-                finished = True
-                break
-            
-            if (i + 1) % args.validate_freq == 0:
-                acc = validate_all(test_loader, patch, model, criterion)
-                pil = tensor_to_pil(patch, clip=True)
-                pil.save("patch_{}.jpg".format(i//args.validate_freq))
-                print("Batch {}/{}".format(i+1, args.steps))
-                print('Accuracy after patch application: %.4f\n' % acc)
-
-        if finished:
-            break
-
-    with open(args.patch, "wb") as f:
-        pickle.dump(patch.cpu(), f)
+    patch[0] = torch.clamp(patch[0], ch_ranges[0][0], ch_ranges[0][1])
+    patch[1] = torch.clamp(patch[1], ch_ranges[1][0], ch_ranges[1][1])
+    patch[2] = torch.clamp(patch[2], ch_ranges[2][0], ch_ranges[2][1])
 
 
 def dump_images(images):
@@ -185,79 +173,52 @@ def dump_images(images):
         pil.save("dumped_image_{}.png".format(i))
 
 
-def plotting(X1, X2, model, epoch):
-    model.eval()
-    output1 = model(X1.cuda())
-    output2 = model(X2.cuda())
-
-    _, pred1 = torch.max(output1, dim=1)
-    _, pred2 = torch.max(output2, dim=1)
-
-    # transfer processing image back to [0,1]
-    invTrans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ], std = [ 1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225 ]),
-                                   transforms.Normalize(mean = [ -0.485, -0.456, -0.406 ], std = [ 1., 1., 1. ]),])
-
-    X1_np = invTrans(X1[0, :]).cpu().numpy()
-    X2_np = invTrans(X2[0, :]).cpu().numpy()
-
-    X1_np = np.swapaxes(X1_np, 0, 2)
-    X2_np = np.swapaxes(X2_np, 0, 2)
-
-    X1_np = np.rot90(X1_np, k = -1, axes = (0, 1))
-    X2_np = np.rot90(X2_np, k = -1, axes = (0, 1))
-
-    X1_np[X1_np > 1] = 1
-    X1_np[X1_np < 0] = 0
-
-    X2_np[X2_np > 1] = 1
-    X2_np[X2_np < 0] = 0
-    
-    fig=plt.figure(figsize=(10, 3))
-
-    plt.subplot(131)
-    plt.imshow(X1_np)
-    plt.axis('off')
-    plt.title('Origianl with Pred %d' % pred1)
-
-    plt.subplot(132)
-    plt.imshow(X2_np)
-    plt.axis('off')
-    plt.title('TR Perturbed with Pred %d' % pred2)
-
-    plt.subplot(133)
-    plt.imshow(np.sum(np.abs(X1_np-X2_np), axis=2), cmap='hot', interpolation='nearest')
-    plt.axis('off')
-    plt.title('TR Perturbation')
-    plt.colorbar()
-
-    plt.savefig(args.plotting_path + '_epoch_{}'.format(epoch) + 'image.png')
-
-
-def validate_all(dataloader, patch, model, criterion):
-    batch_time = AverageMeter()
+def validate_all(dataloader, patch, model, min_scale, max_scale, samples=5000):
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top1_a = AverageMeter()
 
-    start = time.time()
     for i, (data, target) in enumerate(dataloader):
+        if i * args.batch_size >= samples:
+            break
+
         data, target = data.cuda(), target.cuda()
-        params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
+        params = sample_transform(args.batch_size, min_scale, max_scale, args.max_angle)
         # Apply patch
         output = model(apply_patch(data, patch, params))
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        top1.update(acc1.item(), data.size(0))
-        top5.update(acc5.item(), data.size(0))
+        acc, attack_acc = accuracy(output, target, topk=(1,))
+        top1.update(acc[0].item(), data.size(0))
+        top1_a.update(attack_acc[0].item(), data.size(0))
 
-        # measure elapsed time
-        batch_time.update(time.time() - start)
-        start = time.time()
-        
-        if i % 1000 == 0:
-            print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
+    return top1.avg, top1_a.avg
 
-    return top1.avg
+
+def validate_per_scale(dataloader, patch, model):
+    scales = [0.05, 0.1] #, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
+    accuracies = []
+    accuracies_a = []
+
+    for s in scales:
+        acc, acc_a = validate_all(dataloader, patch, model, s, s)
+        accuracies.append(acc)
+        accuracies_a.append(acc)
+
+    plt.clf()
+
+    plt.plot(scales, accuracies, label="Classifier Accuracy vs. Patch Scale")
+    plt.xlabel("Patch Scale (as % of image)")
+    plt.ylabel("Classifier Accuracy (top 1 %)")
+    plt.grid()
+    plt.savefig("classifier_accuracy.pdf", dpi=150)
+
+    plt.clf()
+
+    plt.plot(scales, accuracies_a, label="Attack Success vs. Patch Scale")
+    plt.xlabel("Patch Scale (as % of image)")
+    plt.ylabel("Attack Success (top 1 %)")
+    plt.grid()
+    plt.savefig("attack_success.pdf", dpi=150)
 
 
 class AverageMeter(object):
@@ -277,21 +238,31 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
+    attack_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
+
     with torch.no_grad():
         maxk = max(topk)
-        batch_size = target.size(0)
 
         _, pred = output.topk(maxk, 1, True, True)
         pred = pred.t()
+
         correct = pred.eq(target.view(1, -1).expand_as(pred))
+        correct_a = pred.eq(attack_targets.view(1, -1).expand_as(pred))
 
         res = []
+        res_a = []
+
         for k in topk:
             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+            res.append(correct_k.mul_(100.0 / args.batch_size))
+
+            correct_k = correct_a[:k].view(-1).float().sum(0, keepdim=True)
+            res_a.append(correct_k.mul_(100.0 / args.batch_size))
+
+        return res, res_a
 
 
 if __name__ == '__main__':

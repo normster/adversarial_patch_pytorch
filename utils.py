@@ -66,13 +66,16 @@ def apply_patch(data, patch, transforms):
     out = data * (1 - mask_t) + patch_t * mask_t
     return out
 
-def tensor_to_pil(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], clip=False):
+
+def tensor_to_pil(image, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), clip=False):
+    image = image.clone()
     out = TF.normalize(image, mean=[0, 0, 0], std=[1/std[0], 1/std[1], 1/std[2]])
     out = TF.normalize(out, mean=[-mean[0], -mean[1], -mean[2]], std=[1, 1, 1])
     if clip:
         out = out * circle_mask(out.size()).cuda()
     out = TF.to_pil_image(out.detach().cpu())
     return out
+
 
 def sample_transform(batch_size, min_scale, max_scale, max_angle):
     scale = torch.empty(batch_size).uniform_(min_scale, max_scale)
