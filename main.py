@@ -167,7 +167,8 @@ def main():
             
             if (i + 1) % args.validate_freq == 0:
                 acc = validate_all(test_loader, patch, model, criterion)
-                #print_patch(patch, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225], "patch_{}.jpg".format(i))
+                pil = tensor_to_pil(patch, clip=True)
+                pil.save("patch_{}.jpg".format(i//args.validate_freq))
                 print("Batch {}/{}".format(i+1, args.steps))
                 print('Accuracy after patch application: %.4f\n' % acc)
 
