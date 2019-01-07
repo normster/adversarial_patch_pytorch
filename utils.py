@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF 
 
 
 def circle_mask(shape, sharpness = 40):
@@ -65,6 +66,12 @@ def apply_patch(data, patch, transforms):
     out = data * (1 - mask_t) + patch_t * mask_t
     return out
 
+def tensor_to_pil(data, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+    out = TF.normalize(data, mean=[0, 0, 0], std=[1/std[0], 1/std[1], 1/std[2]])
+    out = TF.normalize(out, mean=[-mean[0], -mean[1], -mean[2]], std=[1, 1, 1])
+    out = TF.to_pil_image(out.detach().cpu())
+    return out
+
 def sample_transform(batch_size, min_scale, max_scale, max_angle):
     scale = torch.empty(batch_size).uniform_(min_scale, max_scale)
     angle = torch.empty(batch_size).uniform_(-max_angle, max_angle)
@@ -74,8 +81,8 @@ def sample_transform(batch_size, min_scale, max_scale, max_angle):
     for i in range(batch_size):
         s = scale[i]
         # Want to keep abs(shift) + scale <= 1 to keep all of patch inside image
-        x_shift[i] = torch.uniform(s - 1, 1 - s)
-        y_shift[i] = torch.uniform(s - 1, 1 - s)
+        x_shift[i] = np.random.uniform(s - 1, 1 - s)
+        y_shift[i] = np.random.uniform(s - 1, 1 - s)
 
     return scale, angle, x_shift, y_shift
 

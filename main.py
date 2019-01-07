@@ -21,11 +21,10 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
-
 import numpy as np
 import pickle
 
-from utils import circle_mask, affine_coeffs, apply_patch, sample_transform 
+from utils import circle_mask, affine_coeffs, apply_patch, tensor_to_pil, sample_transform 
 
 import matplotlib
 matplotlib.use('agg')
@@ -47,36 +46,21 @@ parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
                         ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=90, type=int, metavar='N',
-                    help='number of total epochs to run')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
-                    help='manual epoch number (useful on restarts)')
+parser.add_argument('--steps', default=500, type=int, metavar='N',
+                    help='number of total batches to run')
+parser.add_argument('--validate-freq', default=100, type=int,
+                    help='number of steps to run before evaluating')
 parser.add_argument('-b', '--batch-size', default = 16, type = int,
                     metavar='N', help='mini-batch size (default: 16)')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+parser.add_argument('--lr', '--learning-rate', default=5.0, type=float,
                     metavar='LR', help='initial learning rate')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                    help='momentum')
-parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)')
-parser.add_argument('--print-freq', '-p', default=10, type=int,
-                    metavar='N', help='print frequency (default: 10)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
-parser.add_argument('--world-size', default=1, type=int,
-                    help='number of distributed processes')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
-                    help='url used to set up distributed training')
-parser.add_argument('--dist-backend', default='gloo', type=str,
-                    help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--gpu', default=None, type=int,
-                    help='GPU id to use.')
-
-parser.add_argument('--target-class', default = 0, type = int,
+parser.add_argument('--target-class', default = 859, type = int,
                     help='target class of adversarial patch')
 # for plotting
 parser.add_argument('--plotting', action = 'store_true',
@@ -97,34 +81,6 @@ def main():
     global args, best_acc1
     args = parser.parse_args()
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        cudnn.deterministic = True
-        warnings.warn('You have chosen to seed training. '
-                      'This will turn on the CUDNN deterministic setting, '
-                      'which can slow down your training considerably! '
-                      'You may see unexpected behavior when restarting '
-                      'from checkpoints.')
-
-    if args.gpu is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely '
-                      'disable data parallelism.')
-
-    args.distributed = args.world_size > 1
-
-    if args.distributed:
-        dist.init_process_group(backend = args.dist_backend, init_method = args.dist_url,
-                                world_size = args.world_size)
-
-    if args.norm == 2:
-        print('\nPerforming TR L2 Attack')
-    elif args.norm == 8:
-        print('\nPerforming TR Linf Attack')
-    else:
-        print('\nError! Incorrect option passed for norm')
-        return
-
     # create model
     if args.pretrained:
         print("=> using pre-trained model '{}'".format(args.arch))
@@ -133,28 +89,15 @@ def main():
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
 
-    if args.gpu is not None:
-        model = model.cuda(args.gpu)
-    elif args.distributed:
+    if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
+        model.features = torch.nn.DataParallel(model.features)
         model.cuda()
-        model = torch.nn.parallel.DistributedDataParallel(model)
     else:
-        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
-            model.features = torch.nn.DataParallel(model.features)
-            model.cuda()
-        else:
-            model = torch.nn.DataParallel(model).cuda()
+        model = torch.nn.DataParallel(model).cuda()
 
     for param in model.parameters():
         param.requires_grad = False
 
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                momentum = args.momentum,
-                                weight_decay = args.weight_decay)
-
-    cudnn.benchmark = True
 
     # Data loading code
     valdir = os.path.join(args.data, 'val')
@@ -171,21 +114,17 @@ def main():
         batch_size = args.batch_size, shuffle = True,
         num_workers = args.workers)
 
-    total_batches = len(test_loader)
-    stat_time = time.time()
-    
-    result_acc = 0.
-    result_dis = 0.
-    result_large = 0.
-   
     # legal r range: [-0.485 / 0.229, (1 - 0.485) / 0.229]
     # legal g range: [-0.456 / 0.224, (1 - 0.456) / 0.224]
     # legal b range: [-0.406 / 0.225, (1 - 0.406) / 0.225]
-    patch = torch.rand((3, 224, 224)).cuda()
+    patch = torch.zeros((3, 224, 224)).cuda()
     patch[0] = (patch[0] - 0.485) / 0.229
     patch[1] = (patch[1] - 0.456) / 0.224
     patch[2] = (patch[2] - 0.406) / 0.225
     patch.requires_grad = True
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD([patch], args.lr)
 
     ch_ranges = [
             [-0.485 / 0.229, (1 - 0.485) / 0.229],
@@ -194,25 +133,25 @@ def main():
     ]
     
     model.eval()
-    for epoch in range(args.epochs):
-        start_time = time.time()
-        print("Begin epoch {}".format(epoch))
-        for i, (data, target) in enumerate(test_loader):
-            if i % 100:
-                print("Batch {}/{}".format(i+1, total_batches))
+    i = 0
 
+    train_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
+
+    while True:
+        finished = False
+        for data, _ in test_loader:
+            data = data.cuda()
+            optimizer.zero_grad()
             patch = patch.detach()
             patch.requires_grad = True
-
             params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
-
             # Apply patch
-            output = model(apply_patch(data, patch, transforms))
+            output = model(apply_patch(data, patch, params))
 
-            loss = criterion(output, target)
+            loss = criterion(output, train_targets)
             loss.backward()
 
-            patch.data += args.learning_rate * patch.grad.data
+            optimizer.step()
 
             if ch_ranges:
                 patch[0] = torch.clamp(patch[0], ch_ranges[0][0], ch_ranges[0][1])
@@ -221,26 +160,28 @@ def main():
             else:
                 patch = torch.clamp(patch, 0, 1)
 
-            acc = validate_all(data, target, patch, model, criterion)
-            result_acc += acc.item()
-
-        with open(args.patch+'/epoch{}'.format(epoch), "wb") as f:
-            pickle.dump(patch.cpu(), f)
+            i += 1
+            if i >= args.steps:
+                finished = True
+                break
             
-        print('time: %.4f' % (time.time() - start_time))
-        print('\nAccuracy after TR perturbation: %.4f' % (result_acc / (i + 1)))
+            if (i + 1) % args.validate_freq == 0:
+                acc = validate_all(test_loader, patch, model, criterion)
+                #print_patch(patch, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225], "patch_{}.jpg".format(i))
+                print("Batch {}/{}".format(i+1, args.steps))
+                print('Accuracy after patch application: %.4f\n' % acc)
+
+        if finished:
+            break
+
+    with open(args.patch, "wb") as f:
+        pickle.dump(patch.cpu(), f)
 
 
-def attack(model, patch, data, target, ch_ranges):
-    model.eval()
-    patch = patch.detach()
-    patch.requires_grad = True
-
-    # Apply patch
-    output = model(apply_patch(data, patch, max_angle, scale))
-    n = len(data)
-
-    loss =  
+def dump_images(images):
+    for i in range(images.size(0)):
+        pil = tensor_to_pil(images[i])
+        pil.save("dumped_image_{}.png".format(i))
 
 
 def plotting(X1, X2, model, epoch):
@@ -290,42 +231,30 @@ def plotting(X1, X2, model, epoch):
 
     plt.savefig(args.plotting_path + '_epoch_{}'.format(epoch) + 'image.png')
 
-def validate_all(X, Y, patch, model, criterion):
+
+def validate_all(dataloader, patch, model, criterion):
     batch_time = AverageMeter()
-    losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
-    # switch to evaluate mode
-    model.eval()
+    start = time.time()
+    for i, (data, target) in enumerate(dataloader):
+        data, target = data.cuda(), target.cuda()
+        params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
+        # Apply patch
+        output = model(apply_patch(data, patch, params))
 
-    num_data = X.size()[0]
-    num_iter = num_data//1
-    with torch.no_grad():
-        end = time.time()
-        for i in range(num_iter):
-            #if args.gpu is not None:
-            input = X[i : (i + 1),:].cuda(args.gpu, non_blocking = True)
-            target = Y[i : (i + 1)].cuda(args.gpu, non_blocking = True)
+        # measure accuracy and record loss
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        top1.update(acc1.item(), data.size(0))
+        top5.update(acc5.item(), data.size(0))
 
-            adv_input = apply_patch(input, patch, args.max_angle, args.scale)
-
-            # compute output
-            output = model(adv_input)
-            loss = criterion(output, target)
-
-            # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), input.size(0))
-            top1.update(acc1[0], input.size(0))
-            top5.update(acc5[0], input.size(0))
-
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
-
-        # print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-        #       .format(top1=top1, top5=top5))
+        # measure elapsed time
+        batch_time.update(time.time() - start)
+        start = time.time()
+        
+        if i % 1000 == 0:
+            print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
 
     return top1.avg
 
