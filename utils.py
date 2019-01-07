@@ -23,7 +23,7 @@ def circle_mask(shape, sharpness = 40):
     return mask
 
 
-def affine_coeffs(x_shift, y_shift, scale, angle):
+def affine_coeffs(scale, angle, x_shift, y_shift):
     """
     If one row of transforms is [a0, a1, a2, b0, b1, b2, c0, c1], 
     then it maps the output point (x, y) to a transformed input point 
