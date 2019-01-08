@@ -35,8 +35,8 @@ def affine_coeffs(scale, angle, x_shift, y_shift):
 
     # Standard rotation matrix
     # (use negative rot because nn.functional.affine_grid will do the inverse)
-    cos = torch.cos(angle)
-    sin = torch.sin(angle)
+    cos = torch.cos(-rot)
+    sin = torch.sin(-rot)
 
     # Scale everything by inverse because nn.functional.affine_grid will do the inverse 
     cos /= scale

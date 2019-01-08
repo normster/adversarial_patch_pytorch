@@ -14,14 +14,16 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
-import torch.utils.data
+import torch.utils.data 
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
 import numpy as np
+import math
 import pickle
+import pudb
 
 from utils import circle_mask, affine_coeffs, apply_patch, tensor_to_pil, sample_transform 
 
@@ -51,7 +53,8 @@ parser.add_argument('--validate-freq', default=100, type=int,
                     help='number of steps to run before evaluating')
 parser.add_argument('-b', '--batch-size', default = 16, type = int,
                     metavar='N', help='mini-batch size (default: 16)')
-parser.add_argument('--lr', '--learning-rate', default=10, type=float,
+parser.add_argument('--test-batch', default=100, type=int)
+parser.add_argument('--lr', '--learning-rate', default=10., type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -122,8 +125,6 @@ def main():
 
     for i, (data, _) in enumerate(test_loader):
         train_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
-        import pudb
-        pudb.set_trace()
         data = data.cuda()
 
         patch.detach_()
@@ -137,19 +138,22 @@ def main():
         loss = criterion(output, train_targets)
         loss.backward()
 
-        patch.data.add_(-args.lr, patch.grad.data)
+        patch.data -= args.lr * patch.grad.data
         clamp_to_valid(patch)
 
         if i >= args.steps:
             break
         
         if (i + 1) % args.validate_freq == 0:
-            pil = tensor_to_pil(patch, clip=True)
+            pil = tensor_to_pil(patch, clip=False)
             print("Saving patch after Batch {}/{}".format(i+1, args.steps))
             pil.save("patch_{}.png".format(i//args.validate_freq))
 
+            #acc, acc_a = validate_all(test_loader, patch, model, 0.35, 0.35)
+            #print("Clf acc: {}\tAtk acc: {}".format(acc, acc_a))
 
-    #validate_per_scale(test_loader, patch, model)
+
+    validate_per_scale(test_loader, patch, model)
 
     with open(args.patch, "wb") as f:
         pickle.dump(patch.cpu(), f)
@@ -167,55 +171,57 @@ def clamp_to_valid(patch):
     patch[2] = torch.clamp(patch[2], ch_ranges[2][0], ch_ranges[2][1])
 
 
-def dump_images(images):
-    for i in range(images.size(0)):
-        pil = tensor_to_pil(images[i])
-        pil.save("dumped_image_{}.png".format(i))
-
-
-def validate_all(dataloader, patch, model, min_scale, max_scale, samples=5000):
+def validate_all(dataloader, patch, model, min_scale, max_scale, samples=50000):
     top1 = AverageMeter()
     top1_a = AverageMeter()
 
+    batch_sampler = torch.utils.data.BatchSampler(dataloader.sampler, args.test_batch, False)
+    dataloader.batch_sampler = batch_sampler
+
     for i, (data, target) in enumerate(dataloader):
-        if i * args.batch_size >= samples:
+        if i * args.test_batch >= samples:
             break
 
         data, target = data.cuda(), target.cuda()
-        params = sample_transform(args.batch_size, min_scale, max_scale, args.max_angle)
+        params = sample_transform(data.size(0), min_scale, max_scale, args.max_angle)
         # Apply patch
-        output = model(apply_patch(data, patch, params))
+        patched_data = apply_patch(data, patch, params)
+        output = model(patched_data)
 
         # measure accuracy and record loss
         acc, attack_acc = accuracy(output, target, topk=(1,))
         top1.update(acc[0].item(), data.size(0))
         top1_a.update(attack_acc[0].item(), data.size(0))
 
+    batch_sampler = torch.utils.data.BatchSampler(dataloader.sampler, args.batch_size, False)
+    dataloader.batch_sampler = batch_sampler
+
     return top1.avg, top1_a.avg
 
 
 def validate_per_scale(dataloader, patch, model):
-    scales = [0.05, 0.1] #, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
+    sizes = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
     accuracies = []
     accuracies_a = []
 
-    for s in scales:
-        acc, acc_a = validate_all(dataloader, patch, model, s, s)
+    for s in sizes:
+        scale = 2 * math.sqrt(s / math.pi)
+        acc, acc_a = validate_all(dataloader, patch, model, scale, scale)
         accuracies.append(acc)
         accuracies_a.append(acc)
 
     plt.clf()
 
-    plt.plot(scales, accuracies, label="Classifier Accuracy vs. Patch Scale")
-    plt.xlabel("Patch Scale (as % of image)")
+    plt.plot(sizes, accuracies, label="Classifier Accuracy vs. Patch Size")
+    plt.xlabel("Patch Size (as % of image area)")
     plt.ylabel("Classifier Accuracy (top 1 %)")
     plt.grid()
     plt.savefig("classifier_accuracy.pdf", dpi=150)
 
     plt.clf()
 
-    plt.plot(scales, accuracies_a, label="Attack Success vs. Patch Scale")
-    plt.xlabel("Patch Scale (as % of image)")
+    plt.plot(sizes, accuracies_a, label="Attack Success vs. Patch Size")
+    plt.xlabel("Patch Size (as % of image area)")
     plt.ylabel("Attack Success (top 1 %)")
     plt.grid()
     plt.savefig("attack_success.pdf", dpi=150)
@@ -241,7 +247,7 @@ class AverageMeter(object):
 
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
-    attack_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
+    attack_targets = torch.tensor([args.target_class]).repeat(output.size(0)).cuda()
 
     with torch.no_grad():
         maxk = max(topk)
@@ -257,10 +263,10 @@ def accuracy(output, target, topk=(1,)):
 
         for k in topk:
             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / args.batch_size))
+            res.append(correct_k.mul_(100.0 / output.size(0)))
 
             correct_k = correct_a[:k].view(-1).float().sum(0, keepdim=True)
-            res_a.append(correct_k.mul_(100.0 / args.batch_size))
+            res_a.append(correct_k.mul_(100.0 / output.size(0)))
 
         return res, res_a
 
