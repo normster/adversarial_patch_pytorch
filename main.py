@@ -64,8 +64,8 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--target-class', default = 859, type = int,
                     help='target class of adversarial patch')
-parser.add_argument('--patch', type=str, default='patch',
-                    help='location for storing patches')
+parser.add_argument('--output', type=str, default='output',
+                    help='location for storing output')
 parser.add_argument('--max-angle', type=float, default='22.5',
                     help='maximum rotation angle for patch')
 parser.add_argument('--min-scale', type=float, default='0.1',
@@ -147,7 +147,7 @@ def main():
         if (i + 1) % args.validate_freq == 0:
             pil = tensor_to_pil(patch, clip=False)
             print("Saving patch after Batch {}/{}".format(i+1, args.steps))
-            pil.save("patch_{}.png".format(i//args.validate_freq))
+            pil.save(args.output + "/patch_{}.png".format(i//args.validate_freq))
 
             #acc, acc_a = validate_all(test_loader, patch, model, 0.35, 0.35)
             #print("Clf acc: {}\tAtk acc: {}".format(acc, acc_a))
@@ -155,7 +155,7 @@ def main():
 
     validate_per_scale(test_loader, patch, model)
 
-    with open(args.patch, "wb") as f:
+    with open(args.output + "/patch", "wb") as f:
         pickle.dump(patch.cpu(), f)
 
 
@@ -207,8 +207,9 @@ def validate_per_scale(dataloader, patch, model):
     for s in sizes:
         scale = 2 * math.sqrt(s / math.pi)
         acc, acc_a = validate_all(dataloader, patch, model, scale, scale)
+        print("At {}% of image area {}% clf acc, {}% attack success".format(s * 100, acc, acc_a))
         accuracies.append(acc)
-        accuracies_a.append(acc)
+        accuracies_a.append(acc_a)
 
     plt.clf()
 
@@ -216,7 +217,7 @@ def validate_per_scale(dataloader, patch, model):
     plt.xlabel("Patch Size (as % of image area)")
     plt.ylabel("Classifier Accuracy (top 1 %)")
     plt.grid()
-    plt.savefig("classifier_accuracy.pdf", dpi=150)
+    plt.savefig(args.output + "/classifier_accuracy.pdf", dpi=150)
 
     plt.clf()
 
@@ -224,7 +225,7 @@ def validate_per_scale(dataloader, patch, model):
     plt.xlabel("Patch Size (as % of image area)")
     plt.ylabel("Attack Success (top 1 %)")
     plt.grid()
-    plt.savefig("attack_success.pdf", dpi=150)
+    plt.savefig(args.output + "/attack_success.pdf", dpi=150)
 
 
 class AverageMeter(object):
