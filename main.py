@@ -23,7 +23,6 @@ import torchvision.models as models
 import numpy as np
 import math
 import pickle
-import pudb
 
 from utils import circle_mask, affine_coeffs, apply_patch, tensor_to_pil, sample_transform 
 
@@ -72,11 +71,18 @@ parser.add_argument('--min-scale', type=float, default='0.1',
                     help='min scale for patch')
 parser.add_argument('--max-scale', type=float, default='1.0',
                     help='max scale for patch')
+parser.add_argument('--tv-scale', type=float, default='0.',
+                    help='scale for total variation patch loss')
 
 
 def main():
     global args, best_acc1
     args = parser.parse_args()
+
+    if not os.path.isdir(args.output):
+        os.mkdir(args.output)
+
+    logfile = open(args.output + "/log", "w")
 
     # create model
     if args.pretrained:
@@ -116,6 +122,7 @@ def main():
     # legal b range: [-0.406 / 0.225, (1 - 0.406) / 0.225]
     patch = torch.zeros((3, 224, 224)).cuda()
     patch = normalize(patch)
+    clamp_to_valid(patch) 
 
     patch.requires_grad = True
 
@@ -135,7 +142,11 @@ def main():
         patched_data = apply_patch(data, patch, params)
         output = model(patched_data)
 
-        loss = criterion(output, train_targets)
+        class_loss = criterion(output, train_targets)
+        masked_patch = patch * circle_mask(patch.size()).cuda()
+        patch_loss = torch.sum(torch.abs(masked_patch[:,:,:-1] - masked_patch[:,:,1:]))\
+                        + torch.sum(torch.abs(masked_patch[:,:-1,:] - masked_patch[:,1:,:]))
+        loss = class_loss + args.tv_scale * patch_loss
         loss.backward()
 
         patch.data -= args.lr * patch.grad.data
@@ -149,11 +160,9 @@ def main():
             print("Saving patch after Batch {}/{}".format(i+1, args.steps))
             pil.save(args.output + "/patch_{}.png".format(i//args.validate_freq))
 
-            #acc, acc_a = validate_all(test_loader, patch, model, 0.35, 0.35)
-            #print("Clf acc: {}\tAtk acc: {}".format(acc, acc_a))
+    validate_per_scale(test_loader, patch, model, logfile)
 
-
-    validate_per_scale(test_loader, patch, model)
+    logfile.close()
 
     with open(args.output + "/patch", "wb") as f:
         pickle.dump(patch.cpu(), f)
@@ -199,15 +208,17 @@ def validate_all(dataloader, patch, model, min_scale, max_scale, samples=50000):
     return top1.avg, top1_a.avg
 
 
-def validate_per_scale(dataloader, patch, model):
-    sizes = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
+def validate_per_scale(dataloader, patch, model, logfile):
+    sizes = [0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4]
     accuracies = []
     accuracies_a = []
 
     for s in sizes:
         scale = 2 * math.sqrt(s / math.pi)
         acc, acc_a = validate_all(dataloader, patch, model, scale, scale)
-        print("At {}% of image area {}% clf acc, {}% attack success".format(s * 100, acc, acc_a))
+        msg = "At {}% of image area {}% clf acc, {}% attack success\n".format(s * 100, acc, acc_a)
+        print(msg)
+        logfile.write(msg)
         accuracies.append(acc)
         accuracies_a.append(acc_a)
 
