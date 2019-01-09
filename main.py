@@ -73,6 +73,8 @@ parser.add_argument('--max-scale', type=float, default='1.0',
                     help='max scale for patch')
 parser.add_argument('--tv-scale', type=float, default='0.',
                     help='scale for total variation patch loss')
+parser.add_argument('--random-init', action='store_true',
+                    help='initialize patch with random normal')
 
 
 def main():
@@ -120,8 +122,10 @@ def main():
     # legal r range: [-0.485 / 0.229, (1 - 0.485) / 0.229]
     # legal g range: [-0.456 / 0.224, (1 - 0.456) / 0.224]
     # legal b range: [-0.406 / 0.225, (1 - 0.406) / 0.225]
-    patch = torch.zeros((3, 224, 224)).cuda()
-    patch = normalize(patch)
+    if args.random_init:
+        patch = patch.randn((3, 224, 224)).cuda()
+    else:
+        patch = torch.zeros((3, 224, 224)).cuda()
     clamp_to_valid(patch) 
 
     patch.requires_grad = True
@@ -228,6 +232,7 @@ def validate_per_scale(dataloader, patch, model, logfile):
     plt.xlabel("Patch Size (as % of image area)")
     plt.ylabel("Classifier Accuracy (top 1 %)")
     plt.grid()
+    plt.axis([sizes[0], sizes[-1], 0, 100])
     plt.savefig(args.output + "/classifier_accuracy.pdf", dpi=150)
 
     plt.clf()
@@ -236,6 +241,7 @@ def validate_per_scale(dataloader, patch, model, logfile):
     plt.xlabel("Patch Size (as % of image area)")
     plt.ylabel("Attack Success (top 1 %)")
     plt.grid()
+    plt.axis([sizes[0], sizes[-1], 0, 100])
     plt.savefig(args.output + "/attack_success.pdf", dpi=150)
 
 
