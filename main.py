@@ -55,6 +55,8 @@ parser.add_argument('-b', '--batch-size', default = 16, type = int,
 parser.add_argument('--test-batch', default=100, type=int)
 parser.add_argument('--lr', '--learning-rate', default=10., type=float,
                     metavar='LR', help='initial learning rate')
+parser.add_argument('--schedule', type=int, nargs='+', default=[2000, 3000],
+                        help='Decrease learning rate at these steps.')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
@@ -134,35 +136,49 @@ def main():
     
     model.eval()
 
-    for i, (data, _) in enumerate(test_loader):
-        train_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
-        data = data.cuda()
+    lr = args.lr
 
-        patch.detach_()
-        patch.requires_grad = True
+    i = 0
+    while True:
+        finished = False
+        for data, _ in test_loader:
+            if i in args.schedule:
+                lr = 0.1 * lr
 
-        params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
-        # Apply patch
-        patched_data = apply_patch(data, patch, params)
-        output = model(patched_data)
+            train_targets = torch.tensor([args.target_class]).repeat(args.batch_size).cuda()
+            data = data.cuda()
 
-        class_loss = criterion(output, train_targets)
-        masked_patch = patch * circle_mask(patch.size()).cuda()
-        patch_loss = torch.sum(torch.abs(masked_patch[:,:,:-1] - masked_patch[:,:,1:]))\
-                        + torch.sum(torch.abs(masked_patch[:,:-1,:] - masked_patch[:,1:,:]))
-        loss = class_loss + args.tv_scale * patch_loss
-        loss.backward()
+            patch.detach_()
+            patch.requires_grad = True
 
-        patch.data -= args.lr * patch.grad.data
-        clamp_to_valid(patch)
+            params = sample_transform(args.batch_size, args.min_scale, args.max_scale, args.max_angle)
+            # Apply patch
+            patched_data = apply_patch(data, patch, params)
+            output = model(patched_data)
 
-        if i >= args.steps:
+            class_loss = criterion(output, train_targets)
+            masked_patch = patch * circle_mask(patch.size()).cuda()
+            patch_loss = torch.sum(torch.abs(masked_patch[:,:,:-1] - masked_patch[:,:,1:]))\
+                            + torch.sum(torch.abs(masked_patch[:,:-1,:] - masked_patch[:,1:,:]))
+            loss = class_loss + args.tv_scale * patch_loss
+            loss.backward()
+
+            patch.data -= lr * patch.grad.data
+            clamp_to_valid(patch)
+
+            i += 1
+
+            if i >= args.steps:
+                finished = True
+                break
+            
+            if (i + 1) % args.validate_freq == 0:
+                pil = tensor_to_pil(patch)
+                print("Saving patch after Batch {}/{}".format(i+1, args.steps))
+                pil.save(args.output + "/patch_{}.png".format(i//args.validate_freq))
+
+        if finished:
             break
-        
-        if (i + 1) % args.validate_freq == 0:
-            pil = tensor_to_pil(patch, clip=False)
-            print("Saving patch after Batch {}/{}".format(i+1, args.steps))
-            pil.save(args.output + "/patch_{}.png".format(i//args.validate_freq))
 
     validate_per_scale(test_loader, patch, model, logfile)
 
